@@ -79,12 +79,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	});
 
 	// ────────────────────────────────────────────────────────────────
-	// before_agent_start — prepend the assembled memory block to the
-	// system prompt. Order matters: Managed first (lowest priority),
-	// User, Project, Local, AutoMem last (highest priority). We
-	// prepend in front of pi's own AGENTS.md content so the LLM sees
-	// memory rules BEFORE it sees any project-specific AGENTS.md.
-	// (Matches claude-code's lowest-priority-loads-first convention.)
+	// before_agent_start — insert the assembled memory block into the
+	// system prompt. Position matters: the block goes AFTER pi's built-in
+	// prompt (base intro, tools, guidelines, docs) but BEFORE the
+	// <project_context> (CLAUDE.md / AGENTS.md) section, matching
+	// claude-code's ordering where memory precedes project context. When no
+	// project context is present we fall back to prepending.
 	// ────────────────────────────────────────────────────────────────
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -111,9 +111,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			const block = await buildMemoryBlock(ctx);
 			if (!block) return; // no memory files — leave the prompt untouched
 
-			return {
-				systemPrompt: `${block}\n\n${event.systemPrompt}`,
-			};
+			const next = insertMemoryBlock(event.systemPrompt, block);
+			if (
+				process.env[DEBUG_ENV] === "1" ||
+				process.env[DEBUG_ENV] === "true"
+			) {
+				// eslint-disable-next-line no-console
+				console.log("=== picc-memory: final systemPrompt ===");
+				// eslint-disable-next-line no-console
+				console.log(next);
+				// eslint-disable-next-line no-console
+				console.log("=== end ===");
+			}
+			return { systemPrompt: next };
 		} catch (err) {
 			console.error("[picc-memory] before_agent_start error:", err);
 		}
@@ -168,6 +178,28 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 // ============================================================================
 // Memory-block assembly
 // ============================================================================
+
+// pi core renders project context (CLAUDE.md / AGENTS.md) behind this
+// literal marker (see `system-prompt.js` in @earendil-works/pi-coding-agent).
+const PROJECT_CONTEXT_MARKER =
+	"\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n";
+
+/**
+ * Insert `block` after pi's built-in prompt but before the `<project_context>`
+ * (CLAUDE.md / AGENTS.md) section — matching claude-code's ordering. If no
+ * project context is present in the base prompt, fall back to prepending the
+ * block (the previous behavior), so memory is still surfaced on a fresh
+ * project with no context files.
+ */
+function insertMemoryBlock(basePrompt: string, block: string): string {
+	const idx = basePrompt.indexOf(PROJECT_CONTEXT_MARKER);
+	if (idx === -1) {
+		return `${block}\n\n${basePrompt}`;
+	}
+	const before = basePrompt.slice(0, idx); // ends right before the "\n\n"
+	const marker = basePrompt.slice(idx); // the marker + CLAUDE.md + rest
+	return `${before}\n\n${block}\n\n${marker}`;
+}
 
 /**
  * GetMemoryPrompt is sync; assemble, optionally log a debug preview.
