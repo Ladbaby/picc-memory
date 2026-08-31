@@ -10,17 +10,31 @@
  *     hazards — same security checks as Claude Code.
  *
  * Path summary:
- *   memoryBase    = ~/.claude/                  (overridable in Claude Code; v1 fixed here)
- *   autoMemDir    = <memoryBase>/projects/<sanitized-git-root>/memory/
+ *   memoryBase    = <agentDir>/extensions/picc-memory/   (≈ ~/.pi/agent/extensions/picc-memory/)
+ *   autoMemDir    = resolved per the chain in getAutoMemPath():
+ *                     1. PICC_REMOTE_MEMORY_DIR            (base dir)
+ *                     2. picc config.json autoMemoryDirectory (full dir)
+ *                     3. CLAUDE_CODE_REMOTE_MEMORY_DIR     (base dir)
+ *                     4. claude-code settings.json autoMemoryDirectory (full dir)
+ *                     5. <memoryBase>/projects/<sanitized-git-root>/memory/
  *   autoMemEntry  = <autoMemDir>/MEMORY.md
  *   managedClaude = /etc/claude-code/CLAUDE.md         (Unix)
  *                   C:\ProgramData\claude-code\CLAUDE.md (Windows)
- *   userClaude    = <memoryBase>/CLAUDE.md
- *   userRulesDir  = <memoryBase>/rules/
+ *   userClaude    = <claudeConfigHome>/CLAUDE.md       (≈ ~/.claude/CLAUDE.md)
+ *   userRulesDir  = <claudeConfigHome>/rules/
+ *
+ * The user/managed CLAUDE.md layers live in Claude Code's *config home*
+ * (~/.claude), kept distinct from the memory base so relocating memory does
+ * not move the CLAUDE.md discovery roots.
+ *
+ * `sanitizePath` mirrors claude-code byte-for-byte (dash-based, 200-char
+ * truncation + djb2 hash) so the project key matches Claude Code's, which is
+ * what makes auto-import from Claude Code's memory unambiguous.
  */
 
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { execSync } from "node:child_process";
-import { existsSync, lstatSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, normalize, sep } from "node:path";
 
@@ -30,6 +44,26 @@ import { isAbsolute, join, normalize, sep } from "node:path";
 
 const AUTO_MEM_DIRNAME = "memory";
 const AUTO_MEM_ENTRYPOINT_NAME = "MEMORY.md";
+
+/** Max length for a single sanitized path component (matches claude-code). */
+const MAX_SANITIZED_LENGTH = 200;
+
+/**
+ * Memory-directory base overrides (base dirs — /projects/<sanitized>/memory/
+ * is appended). Higher precedence first.
+ */
+const ENV_PICC_REMOTE_MEMORY_DIR = "PICC_REMOTE_MEMORY_DIR";
+const ENV_CC_REMOTE_MEMORY_DIR = "CLAUDE_CODE_REMOTE_MEMORY_DIR";
+/**
+ * Claude Code's full-path override + config-home var, consulted only when
+ * locating Claude Code's *source* memory dir for auto-import (see
+ * importFromClaude.ts). Not part of picc's own destination chain.
+ */
+const ENV_CC_COWORK_OVERRIDE = "CLAUDE_COWORK_MEMORY_PATH_OVERRIDE";
+const ENV_CC_CONFIG_DIR = "CLAUDE_CONFIG_DIR";
+
+/** Override for the picc-memory config.json location. */
+const ENV_PICC_MEMORY_CONFIG_PATH = "PICC_MEMORY_CONFIG_PATH";
 
 /** Git rev-parse timeout — keeps startup responsive on slow git repos. */
 const GIT_ROOT_TIMEOUT_MS = 5_000;
@@ -111,23 +145,53 @@ export function isAutoMemoryEnabled(): boolean {
  * In v1 we keep it pinned to ~/.claude/ so it remains consistent across
  * platforms and shells.
  */
+/**
+ * The base directory for persistent *memory* storage (the AutoMem root).
+ *
+ * Defaults to the picc-memory extension install dir
+ * (`<agentDir>/extensions/picc-memory/`, ≈ `~/.pi/agent/extensions/picc-memory/`)
+ * so per-project memory lives with the extension rather than in Claude
+ * Code's `~/.claude`. Overridden per-cwd by the chain in `getAutoMemPath`.
+ * `getAgentDir()` respects `$PI_CODING_AGENT_DIR`.
+ */
 export function getMemoryBaseDir(): string {
-	return join(homedir(), ".claude") + sep;
+	return join(getAgentDir(), "extensions", "picc-memory") + sep;
+}
+
+/**
+ * Claude Code's *config home* — where user/managed CLAUDE.md and settings
+ * live. Kept distinct from the memory base so relocating memory does not move
+ * the CLAUDE.md discovery roots or the source location used for auto-import.
+ * Mirrors claude-code's getClaudeConfigHomeDir().
+ */
+export function getClaudeConfigHomeDir(): string {
+	return process.env[ENV_CC_CONFIG_DIR] ?? join(homedir(), ".claude");
 }
 
 // ============================================================================
 // Auto-memory directory path (the "personal" memory store)
 // ============================================================================
 
+function djb2Hash(s: string): number {
+	let h = 5381;
+	for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+	return h;
+}
+
+/**
+ * Make a string safe for use as a directory name. Mirrors claude-code's
+ * `sanitizePath` (utils/sessionStoragePortable.ts) byte-for-byte: every
+ * non-alphanumeric char → `-`, truncated to MAX_SANITIZED_LENGTH with a djb2
+ * hash suffix when longer. Matching it exactly is REQUIRED so the per-project
+ * directory key equals Claude Code's, which is what makes auto-import from
+ * Claude Code's memory unambiguous.
+ */
 function sanitizePath(rawPath: string): string {
-	// Replace path separators and reserved chars with underscores, then
-	// collapse runs. Matches sanitizePath in claude-code/utils/path.ts
-	// behaviour closely enough to be a stable directory name.
-	return rawPath
-		.replace(/[/\\:]/g, "_")
-		.replace(/[^a-zA-Z0-9._-]/g, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_|_$/g, "");
+	const sanitized = rawPath.replace(/[^a-zA-Z0-9]/g, "-");
+	if (sanitized.length <= MAX_SANITIZED_LENGTH) {
+		return sanitized;
+	}
+	return `${sanitized.slice(0, MAX_SANITIZED_LENGTH)}-${Math.abs(djb2Hash(rawPath)).toString(36)}`;
 }
 
 /**
@@ -150,9 +214,21 @@ function sanitizePath(rawPath: string): string {
  * CC (Unicode canonicalization so a path written one way and read another
  * compares equal).
  */
-export function validateMemoryPath(raw: string | undefined, _expandTilde = false): string | undefined {
+export function validateMemoryPath(raw: string | undefined, expandTilde = false): string | undefined {
 	if (!raw) return undefined;
-	const candidate = raw;
+	let candidate = raw;
+	// Full-dir settings support `~/` expansion (user-friendly). Bare "~",
+	// "~/", "~/.", etc. are NOT expanded — they would make the resolved dir
+	// collapse to $HOME or an ancestor (same class of danger as "/").
+	// Mirrors claude-code's validateMemoryPath().
+	if (expandTilde && (candidate.startsWith("~/") || candidate.startsWith("~\\"))) {
+		const rest = candidate.slice(2);
+		const restNorm = normalize(rest || ".");
+		if (restNorm === "." || restNorm === "..") {
+			return undefined;
+		}
+		candidate = join(homedir(), rest);
+	}
 	const normalized = normalize(candidate).replace(/[/\\]+$/, "");
 	if (
 		!isAbsolute(normalized) ||
@@ -190,27 +266,118 @@ function getAutoMemBase(cwd: string): string {
 	return findCanonicalGitRoot(cwd) ?? normalize(cwd);
 }
 
+// ============================================================================
+// Settings readers (config.json + claude-code settings.json)
+// ============================================================================
+
+type MemoryConfig = { autoMemoryDirectory?: string };
+
+function readJsonConfig(path: string): MemoryConfig {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+		if (parsed && typeof parsed === "object") return parsed as MemoryConfig;
+		return {};
+	} catch {
+		return {};
+	}
+}
+
 /**
- * Returns the auto-memory directory path: <memoryBase>/projects/<sanitized>/memory/.
+ * Path to picc-memory's own config.json. Env override first, then the
+ * extension install dir (Pattern B — sibling to picc-read/grep/etc.; survives
+ * reinstalls and is gitignored).
+ */
+export function getPiccMemoryConfigPath(): string {
+	return (
+		process.env[ENV_PICC_MEMORY_CONFIG_PATH] ??
+		join(getAgentDir(), "extensions", "picc-memory", "config.json")
+	);
+}
+
+/** picc-memory's own `autoMemoryDirectory` (full dir). */
+export function readPiccMemoryConfig(): MemoryConfig {
+	return readJsonConfig(getPiccMemoryConfigPath());
+}
+
+/**
+ * Claude Code's `autoMemoryDirectory` from its user settings.json (full dir).
+ * Honors $CLAUDE_CONFIG_DIR. Only the user-level file is consulted — mirrors
+ * claude-code skipping projectSettings (a checked-in .claude/settings.json
+ * must not be able to redirect memory).
+ */
+export function readClaudeMemoryConfig(): MemoryConfig {
+	const path = join(getClaudeConfigHomeDir(), "settings.json");
+	return existsSync(path) ? readJsonConfig(path) : {};
+}
+
+/**
+ * Resolve where **Claude Code** stores this project's memory, to use as the
+ * auto-import source. Replicates claude-code/memdir/paths.ts getAutoMemPath():
+ *   1. CLAUDE_COWORK_MEMORY_PATH_OVERRIDE      (full dir)
+ *   2. claude settings.json autoMemoryDirectory (full dir, ~/ expand)
+ *   3. <base>/projects/<sanitized-git-root>/memory/  where base is
+ *      CLAUDE_CODE_REMOTE_MEMORY_DIR ?? $CLAUDE_CONFIG_DIR ?? ~/.claude
+ */
+export function getClaudeMemorySourceDir(cwd: string): string {
+	const sanitized = sanitizePath(getAutoMemBase(cwd));
+	const fromCowork = mapToMemDir(process.env[ENV_CC_COWORK_OVERRIDE], sanitized, true);
+	if (fromCowork) return fromCowork;
+	const fromSetting = mapToMemDir(readClaudeMemoryConfig().autoMemoryDirectory, sanitized, true);
+	if (fromSetting) return fromSetting;
+	const base = validateMemoryPath(process.env[ENV_CC_REMOTE_MEMORY_DIR], false) ?? getClaudeConfigHomeDir() + sep;
+	return (join(base, "projects", sanitized, AUTO_MEM_DIRNAME) + sep).normalize("NFC");
+}
+
+/**
+ * Map a raw candidate dir into a concrete auto-memory directory, or undefined
+ * if it is unset or fails validation.
  *
- * Memoized on `cwd` — render-path callers (e.g. isAutoMemPath inside tool
- * filtering) fire per tool-use message, and each miss would otherwise
- * re-run git rev-parse. Closes over cwd so tests can clear by changing cwd.
+ * - `full === false` (base dir, e.g. *_REMOTE_MEMORY_DIR): no tilde expansion,
+ *   and `<base>/projects/<sanitized>/memory/` is appended.
+ * - `full === true` (settings autoMemoryDirectory): `~/` expansion, used
+ *   directly as the memory dir.
+ */
+function mapToMemDir(raw: string | undefined, sanitized: string, full: boolean): string | undefined {
+	const validated = validateMemoryPath(raw, full);
+	if (!validated) return undefined;
+	if (full) return validated;
+	return join(validated, "projects", sanitized, AUTO_MEM_DIRNAME) + sep;
+}
+
+// ============================================================================
+// Auto-memory directory path (the "personal" memory store)
+// ============================================================================
+
+/**
+ * Returns the auto-memory directory path.
  *
- * Source of truth: claude-code/memdir/paths.ts getAutoMemPath(). The
- * `.normalize('NFC')` matches CC's Unicode canonicalization.
+ * Resolution order (first defined wins):
+ *   1. PICC_REMOTE_MEMORY_DIR                 (base dir)
+ *   2. picc config.json autoMemoryDirectory   (full dir)
+ *   3. CLAUDE_CODE_REMOTE_MEMORY_DIR          (base dir)
+ *   4. claude-code settings.json autoMemoryDirectory (full dir)
+ *   5. <getMemoryBaseDir()>/projects/<sanitized-git-root>/memory/
+ *
+ * Memoized on `cwd` — render-path callers (e.g. isAutoMemPath) fire per
+ * tool-use message, and each miss would otherwise re-run git rev-parse.
+ * Closes over cwd so tests can clear by changing cwd. `.normalize('NFC')`
+ * matches claude-code's Unicode canonicalization.
  */
 const autoMemPathCache = new Map<string, string>();
 
 export function getAutoMemPath(cwd: string): string {
 	const cached = autoMemPathCache.get(cwd);
 	if (cached !== undefined) return cached;
-	const memoryBase = getMemoryBaseDir();
-	const projectsDir = join(memoryBase, "projects");
 	const sanitized = sanitizePath(getAutoMemBase(cwd));
-	const result = (normalize(join(projectsDir, sanitized, AUTO_MEM_DIRNAME)) + sep).normalize("NFC");
-	autoMemPathCache.set(cwd, result);
-	return result;
+	const result =
+		mapToMemDir(process.env[ENV_PICC_REMOTE_MEMORY_DIR], sanitized, false) ??
+		mapToMemDir(readPiccMemoryConfig().autoMemoryDirectory, sanitized, true) ??
+		mapToMemDir(process.env[ENV_CC_REMOTE_MEMORY_DIR], sanitized, false) ??
+		mapToMemDir(readClaudeMemoryConfig().autoMemoryDirectory, sanitized, true) ??
+		join(getMemoryBaseDir(), "projects", sanitized, AUTO_MEM_DIRNAME) + sep;
+	const normalized = (normalize(result) + sep).normalize("NFC");
+	autoMemPathCache.set(cwd, normalized);
+	return normalized;
 }
 
 /** Returns the path of MEMORY.md inside the auto-memory directory. */
@@ -272,11 +439,11 @@ function getManagedClaudeRulesDir(): string | undefined {
 }
 
 function getUserClaudeMdPath(): string {
-	return join(getMemoryBaseDir(), "CLAUDE.md");
+	return join(getClaudeConfigHomeDir(), "CLAUDE.md");
 }
 
 function getUserClaudeRulesDir(): string {
-	return join(getMemoryBaseDir(), "rules");
+	return join(getClaudeConfigHomeDir(), "rules");
 }
 
 // ============================================================================

@@ -24,9 +24,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ensureMemoryDirExists } from "./memdir.js";
 import { getMemoryPrompt, getLoadedMemoryFiles } from "./claudemd.js";
+import { autoImportMemoryIfEmpty } from "./importFromClaude.js";
 import { showMemoryCommand } from "./memoryCommand.js";
 import { initExtractor, type ExtractorHandle } from "./extractor.js";
-import { isAutoMemoryEnabled } from "./paths.js";
+import { getAutoMemPath, isAutoMemoryEnabled } from "./paths.js";
 
 // ============================================================================
 // Constants
@@ -97,6 +98,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// write to it without first asking "does this directory
 			// exist?". Also fires under pi -p (print mode).
 			ensureMemoryDirExists(ctx.cwd);
+
+			// One-time migration: if this project's picc memory dir is still
+			// empty, copy the whole per-project memory folder over from Claude
+			// Code. Safe to call every turn — no-op once the destination has
+			// any file (see importFromClaude.ts).
+			const imported = autoImportMemoryIfEmpty(getAutoMemPath(ctx.cwd), ctx.cwd);
+			if (imported > 0) {
+				ctx.ui.notify(`Memory: imported ${imported} file(s) from Claude Code.`, "info");
+			}
 
 			const block = await buildMemoryBlock(ctx);
 			if (!block) return; // no memory files — leave the prompt untouched

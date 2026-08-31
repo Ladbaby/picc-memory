@@ -451,31 +451,43 @@ function buildSearchingPastContextSection(
  */
 export function getMemoryPrompt(cwd: string, onlyAutoMem?: boolean): string | null {
 	const files = getMemoryFiles(cwd, onlyAutoMem);
-	if (files.length === 0) return null;
 
-	const blocks: string[] = [MEMORY_INSTRUCTION_PROMPT, ""];
+	// The AutoMem behavioral instructions are ALWAYS injected on the
+	// before_agent_start path (onlyAutoMem === true) — even when no memory
+	// files exist yet — so the LLM learns how/when to save from the very
+	// first conversation and creates MEMORY.md itself. Without this, a
+	// fresh project would return null below and the extension would stay
+	// inert forever (the LLM is never told to create the file). In the
+	// non-onlyAutoMem path (picker/extractor consumers) keep the legacy
+	// behavior: only include instructions when an AutoMem entry was
+	// actually loaded.
+	const includeInstructions =
+		onlyAutoMem === true || files.some(f => f.type === "AutoMem");
 
-	for (const file of files) {
-		const desc = typeDescription(file.type);
-		blocks.push(`Contents of ${file.path}${desc}:\n\n${file.content}`);
+	// Nothing at all to say: no files and no instructions to inject.
+	if (files.length === 0 && !includeInstructions) return null;
+
+	const blocks: string[] = [];
+
+	// Lead-in + file content only make sense when there is actual file
+	// content below them.
+	if (files.length > 0) {
+		blocks.push(MEMORY_INSTRUCTION_PROMPT, "");
+		for (const file of files) {
+			const desc = typeDescription(file.type);
+			blocks.push(`Contents of ${file.path}${desc}:\n\n${file.content}`);
+		}
 	}
 
-	// Append the AutoMem behavioral instructions AFTER the file contents
-	// (so the LLM has the actual content first, then the how-to-save guidance).
-	const hasAutoMem = files.some(f => f.type === "AutoMem");
-	if (hasAutoMem) {
-		// Idempotent: ensureMemoryDirExists creates the full chain if missing.
-		// System prompt tells the LLM the directory exists.
+	// Append the AutoMem behavioral instructions (after file contents when
+	// present, so the LLM has the actual content first, then the
+	// how-to-save guidance).
+	if (includeInstructions) {
+		// Idempotent: ensureMemoryDirExists creates the full chain if
+		// missing. System prompt tells the LLM the directory exists.
 		const autoMemDir = getAutoMemPath(cwd);
 		ensureMemoryDirExists(cwd);
-		blocks.push(
-			"",
-			...buildAutoMemInstructions(
-				autoMemDir,
-				cwd,
-				readExtraGuidelines(),
-			),
-		);
+		blocks.push(...buildAutoMemInstructions(autoMemDir, cwd, readExtraGuidelines()));
 	}
 
 	return blocks.join("\n");

@@ -14,7 +14,7 @@ pi extension host supplies `before_agent_start`, `session_start`,
 | User | `~/.claude/CLAUDE.md` + `~/.claude/rules/*.md` | yes |
 | Project | `<cwd>/CLAUDE.md`, `<cwd>/.claude/CLAUDE.md`, `<cwd>/.claude/rules/*.md` (walk cwd → fs root) | yes |
 | Local | `<cwd>/CLAUDE.local.md` (walk cwd → fs root) | yes |
-| AutoMem | `~/.claude/projects/<sanitized-git-root>/memory/MEMORY.md` + topic `.md` files | yes |
+| AutoMem | `<autoMemDir>/MEMORY.md` + topic `.md` files — see **Storage** for how `<autoMemDir>` is resolved | yes |
 | Background extraction | Forked agent at end of each turn with restricted write-only-to-memory-dir tools | n/a |
 
 A `/memory` slash command opens the file picker (TUI select) and spawns
@@ -27,14 +27,35 @@ sits before any AGENTS.md content.
 
 ## Storage
 
-- **Memory base:** `~/.claude/` (matches Claude Code; we don't repurpose
-  `~/.pi/agent/` for this).
-- **AutoMem:** `~/.claude/projects/<sanitized-git-root>/memory/`
+**AutoMem directory resolution** (first defined wins; base dirs get
+`/projects/<sanitized-git-root>/memory/` appended, full dirs are used as-is):
+
+1. `PICC_REMOTE_MEMORY_DIR` env var — base dir.
+2. `autoMemoryDirectory` in `~/.pi/agent/extensions/picc-memory/config.json`
+   (override location with `PICC_MEMORY_CONFIG_PATH`) — full dir.
+3. `CLAUDE_CODE_REMOTE_MEMORY_DIR` env var — base dir.
+4. `autoMemoryDirectory` in Claude Code's `~/.claude/settings.json` — full dir.
+5. **Default:** `~/.pi/agent/extensions/picc-memory/projects/<sanitized-git-root>/memory/`
+   (under the extension install dir, not `~/.claude`).
+
+The `<sanitized-git-root>` key is produced by the same `sanitizePath`
+Claude Code uses (non-alphanumeric → `-`, 200-char cap + djb2 hash), so it
+matches Claude Code's project key exactly.
+
+- **Auto-import from Claude Code:** on the first session in a project whose
+  picc memory dir is still empty, the whole per-project memory folder
+  (`MEMORY.md` + topic `.md` + `logs/`) is copied from where Claude Code keeps
+  it (honoring `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE`, Claude's
+  `autoMemoryDirectory`, and `CLAUDE_CODE_REMOTE_MEMORY_DIR`). Once the
+  destination has any file it never imports again, and existing files are never
+  overwritten.
 - **Topic file format:** YAML frontmatter with `name`, `description`, and
   `type` (one of `user`, `feedback`, `project`, `reference`), plus body.
 - **Index file (`MEMORY.md`):** one `- [Title](file.md) — one-line hook` per
   topic. No frontmatter. Truncated to 200 lines OR 25 KB (whichever fires
   first) with a `> WARNING: MEMORY.md is ...` suffix naming the cap that fired.
+- The `projects/` tree is gitignored; user/managed CLAUDE.md still resolve
+  from Claude Code's config home (`~/.claude`), independent of the memory base.
 
 ## Usage
 
@@ -48,6 +69,8 @@ sits before any AGENTS.md content.
 Env variables:
 - `PICC_MEMORY_DEBUG=1` — print the first 500 chars of the assembled
   memory block on `before_agent_start` to the console (dev only).
+- `PICC_REMOTE_MEMORY_DIR` — override the memory base dir (highest priority).
+- `PICC_MEMORY_CONFIG_PATH` — override where `config.json` is read from.
 
 ## Known limitations
 
