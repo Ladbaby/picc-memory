@@ -16,7 +16,6 @@ Layer ordering, discovery, truncation caps, taxonomy prose, and the `MEMORY.md` 
 | Project | `<cwd>/CLAUDE.md`, `<cwd>/.claude/CLAUDE.md`, `<cwd>/.claude/rules/*.md` (walk cwd → fs root) | yes |
 | Local | `<cwd>/CLAUDE.local.md` (walk cwd → fs root) | yes |
 | AutoMem | `<autoMemDir>/MEMORY.md` + topic `.md` files — see **Storage** for how `<autoMemDir>` is resolved | yes |
-| Background extraction | Forked agent at end of each turn (opt-in) with write-only-to-memory-dir tools | n/a |
 
 Loading order matches Claude Code exactly: Managed first (lowest priority —
 the LLM sees them first), then User, then Project (parent → child as the walk
@@ -105,9 +104,6 @@ two `*_REMOTE_MEMORY_DIR` env vars are *base* dirs.
 | `CLAUDE_CODE_REMOTE_MEMORY_DIR` | (unset) | Claude Code's remote memory base dir; consulted after picc's own settings (priority #3). |
 | `PICC_MEMORY_EXTRA_GUIDELINES` / `CLAUDE_COWORK_MEMORY_EXTRA_GUIDELINES` | (unset) | Extra guidance bullets appended to the AutoMem instructions (picc's name wins). |
 | `PICC_DISABLE_AUTO_MEMORY` / `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | (unset) | Kill switch — when truthy, AutoMem instructions and auto-import are skipped (CLAUDE.md layers still load). |
-| `PICC_MEMORY_EXTRACTION` | (unset) | When truthy, enables the opt-in background forked extraction at `agent_end` (requires `@ladbabynpm/picc-subagents`). |
-| `PICC_MEMORY_EXTRACTION_INTERVAL` / `PICC_MEMORY_EXTRACTION_MAX_TURNS` | `1` / `5` | Throttle and per-session turn cap for the background extractor. |
-| `PICC_MEMORY_EXTRACTION_MODEL` | (unset) | Optional model override for the forked extraction agent. |
 | `PICC_MEMORY_DEBUG` | (unset) | When `1`, log the assembled memory block on `before_agent_start` (dev only). |
 
 ## Hooks
@@ -116,8 +112,6 @@ two `*_REMOTE_MEMORY_DIR` env vars are *base* dirs.
 |------|--------|
 | `session_start` | Clear the per-cwd path cache; `notify` how many `CLAUDE.md` files were discovered. |
 | `before_agent_start` | `ensureMemoryDirExists`, run the one-time Claude Code auto-import, then prepend the memory block to `systemPrompt`. |
-| `agent_end` | Fire-and-forget background extraction (only when enabled). |
-| `session_shutdown` | Drain in-flight extraction with a 30 s timeout. |
 
 ## Differences from Claude Code
 
@@ -142,7 +136,5 @@ src/
 ├── memoryTypes.ts      # verbatim Claude Code taxonomy prose constants
 ├── memdir.ts           # ensureMemoryDirExists + truncateEntrypointContent
 ├── claudemd.ts         # file discovery + system prompt building
-├── memoryScan.ts       # scanMemoryFiles + formatMemoryManifest
-├── extractor.ts        # background forked extraction
 └── memoryCommand.ts    # /memory picker + $EDITOR
 ```
