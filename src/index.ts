@@ -6,16 +6,12 @@
  *   - 5-layer CLAUDE.md discovery (Managed → User → Project → Local → AutoMem)
  *   - AutoMem (persistent personal memory) with 4-type taxonomy
  *   - /memory slash command with file picker + $EDITOR launch
- *   - Optional background forked extraction (opt-in via env var; requires
- *     pi-subagents via cross-extension RPC)
  *
  * Loaded by jiti from `~/.pi/agent/extensions/picc-memory/src/index.ts`.
  *
  * Hooks:
  *   - session_start    → prime caches, notify how many memory files loaded
  *   - before_agent_start → prepend memory block to systemPrompt
- *   - agent_end        → trigger background extractor (if enabled)
- *   - session_shutdown → drain in-flight extraction
  *
  * Commands:
  *   - /memory          → picker UI for editing CLAUDE.md / MEMORY.md / rules
@@ -26,7 +22,6 @@ import { ensureMemoryDirExists } from "./memdir.js";
 import { getMemoryPrompt, getLoadedMemoryFiles } from "./claudemd.js";
 import { autoImportMemoryIfEmpty } from "./importFromClaude.js";
 import { showMemoryCommand } from "./memoryCommand.js";
-import { initExtractor, type ExtractorHandle } from "./extractor.js";
 import { getAutoMemPath, isAutoMemoryEnabled } from "./paths.js";
 
 // ============================================================================
@@ -40,12 +35,6 @@ const DEBUG_ENV = "PICC_MEMORY_DEBUG";
 // ============================================================================
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-	// ────────────────────────────────────────────────────────────────
-	// Background extraction — initialised once at extension load.
-	// ────────────────────────────────────────────────────────────────
-
-	const extractor: ExtractorHandle = await initExtractor(pi);
-
 	// ────────────────────────────────────────────────────────────────
 	// session_start — notify the user about how many memory files
 	// were discovered for this cwd, and clear any stale memoisation.
@@ -130,33 +119,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	});
 
 	// ────────────────────────────────────────────────────────────────
-	// agent_end — fire-and-forget background extraction (opt-in).
-	// ────────────────────────────────────────────────────────────────
-
-	pi.on("agent_end", async (_event, ctx) => {
-		if (!extractor.enabled) return;
-		try {
-			extractor.schedule(ctx);
-		} catch (err) {
-			console.error("[picc-memory] agent_end error:", err);
-		}
-	});
-
-	// ────────────────────────────────────────────────────────────────
-	// session_shutdown — drain any in-flight extraction so forked
-	// agents can finish cleanly before the process tears down.
-	// ────────────────────────────────────────────────────────────────
-
-	pi.on("session_shutdown", async () => {
-		if (!extractor.enabled) return;
-		try {
-			await extractor.drain(30_000);
-		} catch {
-			// best-effort
-		}
-	});
-
-	// ────────────────────────────────────────────────────────────────
 	// /memory — open the file picker, edit the selected file in $EDITOR.
 	// ────────────────────────────────────────────────────────────────
 
@@ -208,8 +170,8 @@ function insertMemoryBlock(basePrompt: string, block: string): string {
  * AutoMem layer. pi core already injects CLAUDE.md / AGENTS.md natively
  * at startup (see `docs/quickstart.md` and `docs/usage.md` in
  * `@earendil-works/pi-coding-agent`); re-injecting them here caused the
- * same content to appear twice. The `/memory` picker, the background
- * extractor, and the `session_start` notification all still use
+ * same content to appear twice. The `/memory` picker and the
+ * `session_start` notification both still use
  * `getLoadedMemoryFiles()` without the flag so they see the full 5 layers.
  */
 async function buildMemoryBlock(ctx: ExtensionContext): Promise<string | null> {
