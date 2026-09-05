@@ -1,48 +1,10 @@
-/**
- * Memory type taxonomy.
- *
- * Verbatim prose constants from claude-code/memdir/memoryTypes.ts. These
- * strings are behavioural instructions for the model — the LLM was trained
- * (via RL) on this exact wording, so we copy them byte-for-byte.
- *
- * Memories are constrained to four types capturing context NOT derivable
- * from the current project state. Code patterns, architecture, git history,
- * and file structure are derivable (via grep/git/CLAUDE.md) and should NOT
- * be saved as memories.
- *
- * We always operate in INDIVIDUAL mode (single directory) — there is no
- * private/team split on pi. Combined-mode constants are intentionally
- * omitted from this file.
- */
-
-// ============================================================================
-// Type definitions
-// ============================================================================
-
 export const MEMORY_TYPES = ["user", "feedback", "project", "reference"] as const;
-
 export type MemoryType = (typeof MEMORY_TYPES)[number];
-
-/**
- * Parse a raw frontmatter value into a MemoryType.
- * Invalid or missing values return undefined — legacy files without a
- * `type:` field keep working, files with unknown types degrade gracefully.
- */
 export function parseMemoryType(raw: unknown): MemoryType | undefined {
 	if (typeof raw !== "string") return undefined;
 	const found = MEMORY_TYPES.find(t => t === raw);
 	return found;
 }
-
-// ============================================================================
-// Section: Types of memory (INDIVIDUAL mode)
-// ============================================================================
-
-/**
- * `## Types of memory` section for INDIVIDUAL-only mode (single directory).
- * No <scope> tags. Examples use plain `[saves X memory: …]`. Prose that
- * only makes sense with a private/team split is reworded.
- */
 export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
 	"## Types of memory",
 	"",
@@ -109,14 +71,6 @@ export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
 	"</types>",
 	"",
 ];
-
-// ============================================================================
-// Section: What NOT to save
-// ============================================================================
-
-/**
- * `## What NOT to save in memory` section. Identical across both modes.
- */
 export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
 	"## What NOT to save in memory",
 	"",
@@ -128,21 +82,8 @@ export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
 	"",
 	"These exclusions apply even when the user explicitly asks you to save. If they ask you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.",
 ];
-
-// ============================================================================
-// Sections: When to access / Recall trust
-// ============================================================================
-
-/**
- * Recall-side drift caveat. Single bullet under `## When to access memories`.
- * Proactive: verify memory against current state before answering.
- */
 export const MEMORY_DRIFT_CAVEAT =
 	"- Memory records can become stale over time. Use memory as context for what was true at a given point in time. Before answering the user or building assumptions based solely on information in memory records, verify that the memory is still correct and up-to-date by reading the current state of the files or resources. If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.";
-
-/**
- * `## When to access memories` section. Includes MEMORY_DRIFT_CAVEAT.
- */
 export const WHEN_TO_ACCESS_SECTION: readonly string[] = [
 	"## When to access memories",
 	"- When memories seem relevant, or the user references prior-conversation work.",
@@ -150,11 +91,6 @@ export const WHEN_TO_ACCESS_SECTION: readonly string[] = [
 	"- If the user says to *ignore* or *not use* memory: proceed as if MEMORY.md were empty. Do not apply remembered facts, cite, compare against, or mention memory content.",
 	MEMORY_DRIFT_CAVEAT,
 ];
-
-/**
- * `## Before recommending from memory` section. Heavier-weight guidance on
- * HOW to treat a memory once it's been recalled.
- */
 export const TRUSTING_RECALL_SECTION: readonly string[] = [
 	"## Before recommending from memory",
 	"",
@@ -168,14 +104,6 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
 	"",
 	"A memory that summarizes repo state (activity logs, architecture snapshots) is frozen in time. If the user asks about *recent* or *current* state, prefer `git log` or reading the code over recalling the snapshot.",
 ];
-
-// ============================================================================
-// Frontmatter example
-// ============================================================================
-
-/**
- * Frontmatter format example with the `type` field.
- */
 export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
 	"```markdown",
 	"---",

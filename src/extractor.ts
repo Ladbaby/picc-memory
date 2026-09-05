@@ -1,36 +1,3 @@
-/**
- * Background forked extraction.
- *
- * Replicates claude-code/services/extractMemories/extractMemories.ts with
- * the following design choices for pi:
- *
- *   - The forked subagent is spawned via pi-subagents' cross-extension RPC
- *     (`subagents:rpc:spawn`). If pi-subagents is not installed, we ship
- *     a graceful no-op and emit a one-shot debug notice; the main agent
- *     saves memories on explicit user request via its own tools, so the
- *     system still works.
- *
- *   - pi-subagents does NOT expose a per-spawn tool allowlist; the spawned
- *     agent gets full Read/Write/Edit tools by default. We compensate with
- *     strong system-prompt instructions ("only write to <memoryDir>") in
- *     the extraction prompt. This is the same trade-off Claude Code's
- *     extraction prompt makes — the `canUseTool` filter is belt-and-
- *     suspenders over a prompt that's already restrictive.
- *
- *   - Extractor is opt-in via PICC_MEMORY_EXTRACTION=1 (off by default).
- *     Background extraction costs tokens (a model call per turn on the
- *     default throttle of 1) and can be noisy in tight loops. Users who
- *     want Claude Code's behavior explicitly opt in.
- *
- *   - Throttle: every N eligible turns (default 1, configurable via
- *     PICC_MEMORY_EXTRACTION_INTERVAL). Mutual exclusion: skip if the
- *     main agent already wrote memory files in this range — both paths
- *     shouldn't fire on the same messages.
- *
- *   - Trailing run coalescing: if a new extraction arrives while one is
- *     in flight, stash the latest context and re-run after completion.
- */
-
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ENTRYPOINT_NAME, ensureMemoryDirExists, getAutoMemEntrypoint, getAutoMemPath, isAutoMemPath } from "./memdir.js";
 import {
@@ -39,26 +6,14 @@ import {
 	WHAT_NOT_TO_SAVE_SECTION,
 } from "./memoryTypes.js";
 import { formatMemoryManifest, scanMemoryFiles, type MemoryHeader } from "./memoryScan.js";
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-const ENV_ENABLE = "PICC_MEMORY_EXTRACTION";        // off by default
-const ENV_INTERVAL = "PICC_MEMORY_EXTRACTION_INTERVAL"; // throttle, default 1
-const ENV_MAX_TURNS = "PICC_MEMORY_EXTRACTION_MAX_TURNS"; // default 5
-const ENV_MODEL = "PICC_MEMORY_EXTRACTION_MODEL";   // optional, falls back to parent
+const ENV_ENABLE = "PICC_MEMORY_EXTRACTION";
+const ENV_INTERVAL = "PICC_MEMORY_EXTRACTION_INTERVAL";
+const ENV_MAX_TURNS = "PICC_MEMORY_EXTRACTION_MAX_TURNS";
+const ENV_MODEL = "PICC_MEMORY_EXTRACTION_MODEL";
 const RPC_PING = "subagents:rpc:ping";
 const RPC_SPAWN = "subagents:rpc:spawn";
 const ENV_LOG = "PICC_MEMORY_DEBUG";
-
-/** Initial UUID marker (no messages processed yet). Matches cu -1 in cc. */
 const NO_CURSOR: string | undefined = undefined;
-
-// ============================================================================
-// State (closure-captured, mirrors claude-code's initExtractMemories pattern)
-// ============================================================================
-
 interface ExtractorState {
 	inProgress: boolean;
 	turnsSinceLastRun: number;
@@ -68,7 +23,6 @@ interface ExtractorState {
 	hasLoggedDisabled: boolean;
 	inFlight: Set<Promise<void>>;
 }
-
 function freshState(): ExtractorState {
 	return {
 		inProgress: false,
@@ -80,17 +34,11 @@ function freshState(): ExtractorState {
 		inFlight: new Set(),
 	};
 }
-
-// ============================================================================
-// Message counting (model-visible only)
-// ============================================================================
-
 function isModelVisible(message: unknown): boolean {
 	if (!message || typeof message !== "object") return false;
 	const m = message as { type?: string; role?: string };
 	return m.type === "message" && (m.role === "user" || m.role === "assistant");
 }
-
 function countMessagesSince(
 	messages: unknown[],
 	sinceUuid: string | undefined,
@@ -109,20 +57,10 @@ function countMessagesSince(
 		if (isModelVisible(message)) n++;
 	}
 	if (!started) {
-		// Cursor disappeared (compaction, /clear) — fall back to counting all
-		// visible messages rather than returning 0, which would silently
-		// disable extraction for the rest of the session.
 		return messages.filter(isModelVisible).length;
 	}
 	return n;
 }
-
-/**
- * Did the main agent write to any auto-memory path since the cursor?
- * Returns true iff a Write/Edit tool_use block hit a file under
- * getAutoMemPath(cwd). Mutates the messages array (read-only OK because
- * we only check, never mutate).
- */
 function hasMemoryWritesSince(
 	messages: unknown[],
 	sinceUuid: string | undefined,
@@ -151,25 +89,6 @@ function hasMemoryWritesSince(
 	}
 	return false;
 }
-
-// ============================================================================
-// Prompt building
-// ============================================================================
-
-/**
- * Build the canonical extraction prompt. Source of truth:
- * claude-code/services/extractMemories/prompts.ts buildExtractAutoOnlyPrompt().
- *
- * Notable alignment with CC:
- *   - opener matches verbatim (after substituting picc's tool names)
- *   - "Available tools: …" line matches CC; picc-specific MEMORY_BLOCK_RESTRICTION
- *     is dropped (CC's rely on the prompt + the canUseTool belt-and-suspenders;
- *     picc relies on prompt only)
- *   - howToSave block matches CC's two-step pattern
- *   - WHEN_TO_ACCESS_SECTION + TRUSTING_RECALL_SECTION are NOT included —
- *     those are recall-side guidance for the main agent, not the extraction
- *     sub-agent (CC's extraction prompt also omits them)
- */
 function buildExtractPrompt(newMessageCount: number, existingMemories: string): string {
 	const opener = [
 		`You are now acting as the memory extraction subagent. Analyze the most recent ~${newMessageCount} messages above and use them to update your persistent memory systems.`,
@@ -183,7 +102,6 @@ function buildExtractPrompt(newMessageCount: number, existingMemories: string): 
 				? `\n\n## Existing memory files\n\n${existingMemories}\n\nCheck this list before writing — update an existing file rather than creating a duplicate.`
 				: ""),
 	].join("\n");
-
 	const howToSave = [
 		"## How to save memories",
 		"",
@@ -200,7 +118,6 @@ function buildExtractPrompt(newMessageCount: number, existingMemories: string): 
 		"- Update or remove memories that turn out to be wrong or outdated",
 		"- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.",
 	];
-
 	return [
 		opener,
 		"",
@@ -212,27 +129,18 @@ function buildExtractPrompt(newMessageCount: number, existingMemories: string): 
 		...howToSave,
 	].join("\n");
 }
-
-// ============================================================================
-// RPC plumbing
-// ============================================================================
-
 interface RpcEnvelope<T> {
 	requestId: string;
 	params: T;
 }
-
 type RpcReply<T = unknown> =
 	| { success: true; data?: T }
 	| { success: false; error: string };
-
 let requestSeq = 0;
-
 function nextRequestId(): string {
 	requestSeq += 1;
 	return `picc-mem-${Date.now().toString(36)}-${requestSeq.toString(36)}`;
 }
-
 function rpcCall<TParams, TData>(
 	pi: ExtensionAPI,
 	channel: string,
@@ -245,13 +153,11 @@ function rpcCall<TParams, TData>(
 		emit: (event: string, data: unknown) => void;
 	};
 	const replyChannel = `${channel}:reply:${requestId}`;
-
 	return new Promise<TData>((resolve, reject) => {
 		const timer = setTimeout(() => {
 			unsub();
 			reject(new Error(`picc-memory: RPC ${channel} timed out after ${timeoutMs}ms (is pi-subagents installed?)`));
 		}, timeoutMs);
-
 		const unsub = events.on(replyChannel, (raw: unknown) => {
 			clearTimeout(timer);
 			unsub();
@@ -259,11 +165,9 @@ function rpcCall<TParams, TData>(
 			if (reply.success) resolve((reply.data ?? (undefined as unknown)) as TData);
 			else reject(new Error(reply.error));
 		});
-
 		events.emit(channel, { requestId, params } satisfies RpcEnvelope<TParams>);
 	});
 }
-
 async function pingSubagents(pi: ExtensionAPI): Promise<boolean> {
 	try {
 		await rpcCall<Record<string, never>, { version: number }>(pi, RPC_PING, {});
@@ -272,11 +176,6 @@ async function pingSubagents(pi: ExtensionAPI): Promise<boolean> {
 		return false;
 	}
 }
-
-// ============================================================================
-// Extractor
-// ============================================================================
-
 async function runExtraction(
 	pi: ExtensionAPI,
 	state: ExtractorState,
@@ -285,43 +184,29 @@ async function runExtraction(
 	const cwd = ctx.cwd;
 	const messages = collectBranchMessages(ctx);
 	const interval = readInterval();
-
 	const newCount = countMessagesSince(messages, state.lastMessageUuid);
-
-	// Mutual exclusion: if the main agent already wrote, skip and advance
-	// the cursor so we don't double-process those messages next time.
 	if (hasMemoryWritesSince(messages, state.lastMessageUuid, cwd)) {
 		log(pi, "[picc-memory] skipping extraction — main agent wrote memory files");
 		advanceCursor(messages, state);
 		return;
 	}
-
-	// Throttle: only run every N eligible turns. Use turns-since-last-run
-	// (resets after each run, including this one).
 	state.turnsSinceLastRun += 1;
 	if (state.turnsSinceLastRun < interval) return;
 	state.turnsSinceLastRun = 0;
-
-	// Build the manifest of existing topic files so the fork doesn't burn
-	// turns on `ls`.
 	const memoryDir = getAutoMemPath(cwd);
 	ensureMemoryDirExists(cwd);
 	const headers: MemoryHeader[] = scanMemoryFiles(memoryDir);
 	const existingMemories = formatMemoryManifest(headers);
-
 	const promptText = buildExtractPrompt(newCount, existingMemories);
 	const inheritContextText = buildInheritContext(messages, state.lastMessageUuid);
 	const fullPrompt = inheritContextText
 		? `${inheritContextText}\n\n# Extraction Instructions (below)\n${promptText}`
 		: promptText;
-
 	state.inProgress = true;
 	try {
 		const maxTurns = readMaxTurns();
 		const model = readModel();
-
 		log(pi, `[picc-memory] spawning extraction fork (${newCount} new messages, maxTurns=${maxTurns})`);
-
 		const { id } = await rpcCall<RpcSpawnParams, { id: string }>(pi, RPC_SPAWN, {
 			type: "general-purpose",
 			prompt: fullPrompt,
@@ -335,9 +220,7 @@ async function runExtraction(
 				cwd,
 			},
 		});
-
 		log(pi, `[picc-memory] extraction fork spawned: ${id}`);
-		// Cursor advances AFTER the spawn — pi-subagents takes over from here.
 		advanceCursor(messages, state);
 	} catch (err) {
 		log(pi, `[picc-memory] extraction failed: ${(err as Error).message}`);
@@ -351,7 +234,6 @@ async function runExtraction(
 		}
 	}
 }
-
 interface RpcSpawnParams {
 	type: string;
 	prompt: string;
@@ -365,11 +247,6 @@ interface RpcSpawnParams {
 		cwd: string;
 	};
 }
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
 function collectBranchMessages(ctx: ExtensionContext): unknown[] {
 	try {
 		const sm = ctx.sessionManager as { getBranch?: () => unknown[] } | undefined;
@@ -379,14 +256,12 @@ function collectBranchMessages(ctx: ExtensionContext): unknown[] {
 		return [];
 	}
 }
-
 function advanceCursor(messages: unknown[], state: ExtractorState): void {
 	const last = messages.at(-1);
 	if (last && typeof last === "object" && "uuid" in last) {
 		state.lastMessageUuid = (last as { uuid: string }).uuid;
 	}
 }
-
 function buildInheritContext(messages: unknown[], sinceUuid: string | undefined): string {
 	if (messages.length === 0) return "";
 	const parts: string[] = [];
@@ -409,7 +284,6 @@ function buildInheritContext(messages: unknown[], sinceUuid: string | undefined)
 	if (parts.length === 0) return "";
 	return `# Recent Conversation (last ${parts.length} messages)\n\n${parts.join("\n\n")}`;
 }
-
 function extractText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -421,67 +295,39 @@ function extractText(content: unknown): string {
 		.map((c: unknown) => (c as { text?: unknown }).text ?? "")
 		.join("\n");
 }
-
 function readInterval(): number {
 	const raw = process.env[ENV_INTERVAL]?.trim();
 	if (!raw) return 1;
 	const n = Number.parseInt(raw, 10);
 	return Number.isFinite(n) && n >= 1 ? n : 1;
 }
-
 function readMaxTurns(): number {
 	const raw = process.env[ENV_MAX_TURNS]?.trim();
 	if (!raw) return 5;
 	const n = Number.parseInt(raw, 10);
 	return Number.isFinite(n) && n >= 1 ? n : 5;
 }
-
 function readModel(): string | undefined {
 	const raw = process.env[ENV_MODEL]?.trim();
 	return raw || undefined;
 }
-
 function log(pi: ExtensionAPI, message: string): void {
 	if (process.env[ENV_LOG] === "1" || process.env[ENV_LOG] === "true") {
-		// eslint-disable-next-line no-console
 		console.log(message);
 	}
-	// Emit a lightweight pi-events event so other extensions can observe
-	// extractor activity. No-op for listeners that don't exist.
 	try {
 		(pi.events as unknown as { emit?: (e: string, d: unknown) => void }).emit?.(
 			"picc-memory:debug",
 			{ message, ts: Date.now() },
 		);
 	} catch {
-		// ignore — events is best-effort
 	}
 }
-
-// ============================================================================
-// Public API
-// ============================================================================
-
 export interface ExtractorHandle {
-	/**
-	 * Hook from agent_end. Schedules an extraction pass if eligible.
-	 * Fire-and-forget — never throws into the agent loop.
-	 */
 	schedule: (ctx: ExtensionContext) => void;
-	/**
-	 * Hook from session_shutdown. Awaits any in-flight extraction with a
-	 * soft timeout (default 60s). Best-effort.
-	 */
 	drain: (timeoutMs?: number) => Promise<void>;
-	/** True when the extractor is enabled (env flag set + pi-subagents installed). */
 	enabled: boolean;
 }
-
-/**
- * Initialise the extraction system. Returns a handle the caller wires into
- * agent_end / session_shutdown. State is closure-captured so multiple
- * sessions can coexist without bleeding into each other.
- */
 export async function initExtractor(pi: ExtensionAPI): Promise<ExtractorHandle> {
 	const enabled = process.env[ENV_ENABLE] === "1" || process.env[ENV_ENABLE] === "true";
 	if (!enabled) {
@@ -491,10 +337,8 @@ export async function initExtractor(pi: ExtensionAPI): Promise<ExtractorHandle> 
 			drain: async () => {},
 		};
 	}
-
 	const installed = await pingSubagents(pi);
 	if (!installed) {
-		// eslint-disable-next-line no-console
 		console.warn(
 			"[picc-memory] PICC_MEMORY_EXTRACTION=1 but pi-subagents is not installed. Disabling extraction — the main agent still saves memories on explicit user request.",
 		);
@@ -504,9 +348,7 @@ export async function initExtractor(pi: ExtensionAPI): Promise<ExtractorHandle> 
 			drain: async () => {},
 		};
 	}
-
 	const state = freshState();
-
 	return {
 		enabled: true,
 		schedule(ctx: ExtensionContext) {
@@ -518,10 +360,6 @@ export async function initExtractor(pi: ExtensionAPI): Promise<ExtractorHandle> 
 		},
 		async drain(timeoutMs = 60_000) {
 			if (state.inFlight.size === 0) return;
-			// setTimeout().unref() is fine; Node types accept it. Cast to
-			// `unknown as Timer` because the `.unref()` declaration is on
-			// the NodeJS namespace, not on the DOM Timer — the cast keeps
-			// strict mode happy without pulling in @types/node globally.
 			await new Promise<void>(resolve => {
 				const t = setTimeout(resolve, timeoutMs);
 				t.unref();
@@ -530,6 +368,4 @@ export async function initExtractor(pi: ExtensionAPI): Promise<ExtractorHandle> 
 		},
 	};
 }
-
-// Re-export so callers (e.g. /memory notifications) can display the entrypoint name.
 export { getAutoMemEntrypoint };
