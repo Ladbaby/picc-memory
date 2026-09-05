@@ -1,8 +1,8 @@
 {
   "name": "@ladbabynpm/picc-memory",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
-  "description": "Claude Code-style memory system for pi: CLAUDE.md layers (Managed / User / Project / Local / .claude/rules/) + AutoMem (persistent personal memory) + /memory command.",
+  "description": "Claude Code style memory system for pi: CLAUDE.md layers (Managed / User / Project / Local / .claude/rules/) + AutoMem (persistent personal memory) + /memory command.",
   "keywords": [
     "pi",
     "pi-package",
